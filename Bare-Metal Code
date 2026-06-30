@@ -1,0 +1,554 @@
+// Bare-Metal  Morse Code Communication System Using Software UART
+//TRANSMITTER
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+#include <string.h>
+
+// global variables
+volatile uint32_t ms = 0;
+volatile uint32_t press_start = 0;
+volatile uint16_t press_duration = 0;
+volatile uint8_t button_event = 0;
+
+//morse storage
+char morse[8];
+uint8_t morse_idx = 0;
+
+//Timing variable
+uint32_t last_symbol = 0;
+uint8_t word_sent = 0;
+
+
+// timer interrupt-accurate timing
+
+ISR(TIMER1_COMPA_vect)
+{
+  ms++;
+}
+
+// external interrupt
+
+
+ISR(INT0_vect)
+{
+  static uint32_t last_irq = 0;
+
+
+// debouncing
+
+ if ((ms - last_irq) < 30)
+    return;
+
+
+  last_irq = ms;
+ 
+  // button press detection
+  
+ if (!(PIND & (1 << PD2)))
+  {
+    press_start = ms;
+  }
+  else
+  {
+    press_duration = ms - press_start;
+    button_event = 1;
+  }
+}
+// timer initialization-to generate interrupt 
+
+
+void timer_init()
+{
+  TCCR1A = 0;
+
+
+  TCCR1B = (1 << WGM12);
+  TCCR1B |= (1 << CS11) | (1 << CS10);
+
+
+  OCR1A = 249;
+
+
+  TIMSK1 |= (1 << OCIE1A);
+}
+
+
+// gpio initialization
+
+
+void gpio_init()
+{
+  DDRD &= ~(1 << PD2);
+  PORTD |= (1 << PD2);
+
+
+  DDRD |= (1 << PD3);
+  PORTD |= (1 << PD3);
+}
+
+// external interrupt initialization- decide trigger mode
+
+
+void int0_init()
+{
+  EICRA |= (1 << ISC00);//stes Iscoo bit to 1
+  EICRA &= ~(1 << ISC01);
+
+
+  EIMSK |= (1 << INT0);//enable or disable interrupt
+}
+
+
+//Software UART
+
+
+void soft_uart_tx(char c)
+{
+  PORTD &= ~(1 << PD3);
+  _delay_us(53);
+
+
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    if (c & (1 << i))
+      PORTD |= (1 << PD3);
+    else
+      PORTD &= ~(1 << PD3);
+
+
+    _delay_us(53);
+  }
+
+
+  PORTD |= (1 << PD3);
+  _delay_us(53);
+}
+
+
+// morse decoder
+
+
+char decode_morse(char *s)
+{
+  
+    if (!strcmp(s, ".-")) return 'A';
+    if (!strcmp(s, "-...")) return 'B';
+    if (!strcmp(s, "-.-.")) return 'C';
+    if (!strcmp(s, "-..")) return 'D';
+    if (!strcmp(s, ".")) return 'E';
+    if (!strcmp(s, "..-.")) return 'F';
+    if (!strcmp(s, "--.")) return 'G';
+    if (!strcmp(s, "....")) return 'H';
+    if (!strcmp(s, "..")) return 'I';
+    if (!strcmp(s, ".---")) return 'J';
+    if (!strcmp(s, "-.-")) return 'K';
+    if (!strcmp(s, ".-..")) return 'L';
+    if (!strcmp(s, "--")) return 'M';
+    if (!strcmp(s, "-.")) return 'N';
+    if (!strcmp(s, "---")) return 'O';
+    if (!strcmp(s, ".--.")) return 'P';
+    if (!strcmp(s, "--.-")) return 'Q';
+    if (!strcmp(s, ".-.")) return 'R';
+    if (!strcmp(s, "...")) return 'S';
+    if (!strcmp(s, "-")) return 'T';
+    if (!strcmp(s, "..-")) return 'U';
+    if (!strcmp(s, "...-")) return 'V';
+    if (!strcmp(s, ".--")) return 'W';
+    if (!strcmp(s, "-..-")) return 'X';
+    if (!strcmp(s, "-.--")) return 'Y';
+    if (!strcmp(s, "--..")) return 'Z';
+
+
+
+
+
+  return '?';
+}
+//setup function
+
+
+void setup()
+{
+  cli();
+
+
+  gpio_init();
+  timer_init();
+  int0_init();
+
+
+  sei();
+}
+
+// main loop
+
+
+void loop()
+{
+  if (button_event)
+  {
+    button_event = 0;
+
+
+   
+if (morse_idx < sizeof(morse) - 1)
+{
+    morse[morse_idx++] =
+        (press_duration < 300) ? '.' : '-';
+}
+
+    last_symbol = ms;
+    word_sent = 0;
+  }
+
+// letter gap detection
+
+
+  if (morse_idx > 0 && (ms - last_symbol) > 1000)
+  {
+    morse[morse_idx] = '\0';
+
+
+    char c = decode_morse(morse);
+
+
+    soft_uart_tx(c);
+
+   memset(morse, 0, sizeof(morse));
+   morse_idx = 0;
+    
+  }
+
+// word gap detection
+
+
+  if (!word_sent &&
+      morse_idx == 0 &&
+      (ms - last_symbol) > 2000)
+  {
+    soft_uart_tx(' ');
+    word_sent = 1;
+  }
+}
+
+//RECEIVER
+
+#include <avr/io.h>
+#include <avr/interrupt.h>
+#include <util/delay.h>
+
+
+//pin definitions
+
+
+#define SDA PD4
+#define SCL PD5
+
+
+#define LCD_ADDR 0x27   //address of lcd backpack
+
+// Global variable
+
+
+volatile uint8_t rx_flag = 0;
+uint8_t lcd_pos = 0;
+
+
+//SDA control functions
+
+
+void sda_high()
+{
+  DDRD &= ~(1 << SDA);
+  PORTD |= (1 << SDA);
+}
+
+
+void sda_low()
+{
+  DDRD |= (1 << SDA);
+  PORTD &= ~(1 << SDA);
+}
+
+
+//SCL control functions
+
+
+void scl_high() // releases clock line
+{
+  DDRD &= ~(1 << SCL);
+  PORTD |= (1 << SCL);
+}
+
+
+void scl_low()
+{
+  DDRD |= (1 << SCL);
+  PORTD &= ~(1 << SCL);
+}
+
+
+//i2c delay
+
+
+void i2c_delay()
+{
+  _delay_us(5);
+}
+
+
+// start condition
+
+
+void i2c_start()
+{
+  sda_high();
+  scl_high();
+
+
+  i2c_delay();
+
+
+  sda_low();
+
+
+  i2c_delay();
+
+
+  scl_low();
+}
+
+
+//stop condition
+
+
+void i2c_stop()
+{
+  sda_low();
+
+
+  i2c_delay();
+
+
+  scl_high();
+
+
+  i2c_delay();
+
+
+  sda_high();
+
+
+  i2c_delay();
+}
+
+
+//i2c byte write
+
+
+void i2c_write(uint8_t data)
+{
+  for (uint8_t i = 0; i < 8; i++)
+  {
+    if (data & 0x80)
+      sda_high();
+    else
+      sda_low();
+
+
+    scl_high();
+    i2c_delay();
+
+
+    scl_low();
+    i2c_delay();
+
+
+    data <<= 1;
+  }
+
+
+  sda_high();
+
+
+  scl_high();
+  i2c_delay();
+
+
+  scl_low();
+}
+
+
+void pcf8574_write(uint8_t data)   // back pack address
+{
+  i2c_start();
+
+
+  i2c_write(LCD_ADDR << 1);
+
+
+  i2c_write(data);
+
+
+  i2c_stop();
+}
+
+
+void lcd_pulse(uint8_t data)
+{
+  pcf8574_write(data | 0x04);
+  _delay_us(1);
+
+
+  pcf8574_write(data & ~0x04);
+
+
+  _delay_us(50);
+}
+
+
+void lcd_send(uint8_t value, uint8_t rs)
+{
+  uint8_t high = value & 0xF0;
+  uint8_t low = (value << 4) & 0xF0;
+
+
+  uint8_t h = high | 0x08 | rs;
+  uint8_t l = low | 0x08 | rs;
+
+
+  lcd_pulse(h);
+  lcd_pulse(l);
+}
+
+
+void lcd_cmd(uint8_t cmd)  //configure lcd settings
+{
+  lcd_send(cmd, 0);
+}
+
+
+void lcd_data(uint8_t data)    // print a character on the screen
+{
+  lcd_send(data, 1);
+}
+
+
+void lcd_init()  // initializes lcd
+{
+  _delay_ms(50);
+
+
+  lcd_cmd(0x33);
+  lcd_cmd(0x32);
+
+
+  lcd_cmd(0x28); // 2-line mode
+  lcd_cmd(0x0C);
+
+
+  lcd_cmd(0x06);
+  lcd_cmd(0x01);
+
+
+  _delay_ms(5);
+}
+
+
+ISR(INT0_vect)
+{
+  rx_flag = 1;
+}
+
+
+void uart_rx_init()
+{
+  DDRD &= ~(1 << PD2);
+
+
+  EICRA |= (1 << ISC01); // interrupt trigger
+  EICRA &= ~(1 << ISC00);
+
+
+  EIMSK |= (1 << INT0);
+}
+
+
+char soft_uart_rx()  // samples the incoming serial data bit by bit
+{
+  uint8_t data = 0;
+
+
+  _delay_us(78);
+
+
+  for (uint8_t i = 0; i < 8; i++)  // stores the pin state to bit position
+  {
+    if (PIND & (1 << PD2))
+      data |= (1 << i);
+
+
+    _delay_us(53);
+  }
+
+
+  _delay_us(53);
+
+
+  return data;
+}
+
+
+void setup()
+{
+  cli();  // disables interrupts
+
+
+  uart_rx_init();  
+
+
+  lcd_init();
+
+
+  sei();  // enable interrupts 
+}
+void loop()
+{
+    if (rx_flag)
+{
+    EIMSK &= ~(1 << INT0);   // prevents interrupts from triggering
+
+
+    rx_flag = 0;
+
+
+    char c = soft_uart_rx();
+
+
+    if (c != ' ')
+    {
+        lcd_data(c);
+
+
+        lcd_pos++;
+
+
+        if (lcd_pos == 16)
+            lcd_cmd(0xC0);
+
+
+        if (lcd_pos >= 32)
+        {
+            lcd_cmd(0x01);
+            _delay_ms(2);
+            lcd_pos = 0;
+        }
+    }
+
+
+    EIFR |= (1 << INTF0);    // Clear pending flag
+    EIMSK |= (1 << INT0);    // Re-enable INT0
+}
+}
